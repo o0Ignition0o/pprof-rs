@@ -3,7 +3,7 @@
 use std::convert::TryInto;
 use std::os::raw::c_int;
 
-use backtrace::Frame;
+use backtrace::{Backtrace, Frame};
 use nix::sys::signal;
 
 use crate::collector::Collector;
@@ -27,31 +27,29 @@ pub struct Profiler {
 /// RAII structure used to stop profiling when dropped. It is the only interface to access profiler.
 pub struct ProfilerGuard<'a> {
     profiler: &'a spin::RwLock<Result<Profiler>>,
+    backtrace: Backtrace,
     timer: Option<Timer>,
-}
-
-fn trigger_lazy() {
-    let _ = backtrace::Backtrace::new();
-    PROFILER.read();
 }
 
 impl ProfilerGuard<'_> {
     /// Start profiling with given sample frequency.
     pub fn new(frequency: c_int) -> Result<ProfilerGuard<'static>> {
-        trigger_lazy();
-
         match PROFILER.write().as_mut() {
             Err(err) => {
                 log::error!("Error in creating profiler: {}", err);
                 Err(Error::CreatingError)
             }
             Ok(profiler) => match profiler.start() {
-                Ok(()) => Ok(ProfilerGuard::<'static> {
-                    profiler: &PROFILER,
-                    timer: Some(Timer::new(frequency)),
-                }),
+                Ok(()) => {
+                    Ok(ProfilerGuard::<'static> {
+                            backtrace: backtrace::Backtrace::new_unresolved(),
+                            profiler: &PROFILER,
+                            timer: Some(Timer::new(frequency)),
+                        }
+                    )
+                },
                 Err(err) => Err(err),
-            },
+            }
         }
     }
 
@@ -68,7 +66,9 @@ impl<'a> Drop for ProfilerGuard<'a> {
         match self.profiler.write().as_mut() {
             Err(_) => {}
             Ok(profiler) => match profiler.stop() {
-                Ok(()) => {}
+                Ok(()) => {
+                    self.backtrace.resolve();
+                }
                 Err(err) => log::error!("error while stopping profiler {}", err),
             },
         }
